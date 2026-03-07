@@ -69,6 +69,7 @@ export type Journal = {
 		when: number;
 		tag: string;
 		breakpoints: boolean;
+		hasDown?: boolean;
 	}[];
 };
 

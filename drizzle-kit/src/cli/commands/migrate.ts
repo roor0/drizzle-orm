@@ -65,6 +65,48 @@ export type NamedWithSchema = {
 	schema: string;
 };
 
+// Non-interactive resolvers used for auto-generating down SQL (no rename detection)
+const autoResolverNoRename = async <T extends { name: string }>(
+	input: ResolverInput<T>,
+): Promise<ResolverOutput<T>> => ({ created: input.created, deleted: input.deleted, renamed: [] });
+
+const autoResolverWithMovedNoRename = async <T extends { name: string }>(
+	input: ResolverInput<T>,
+): Promise<ResolverOutputWithMoved<T>> => ({
+	created: input.created,
+	deleted: input.deleted,
+	moved: [],
+	renamed: [],
+});
+
+const autoColumnsResolverNoRename = async <T extends { name: string }>(
+	input: ColumnsResolverInput<T>,
+): Promise<ColumnsResolverOutput<T>> => ({
+	tableName: input.tableName,
+	schema: input.schema,
+	created: input.created,
+	deleted: input.deleted,
+	renamed: [],
+});
+
+const autoPolicyResolverNoRename = async <T extends { name: string }>(
+	input: PolicyResolverInput<T>,
+): Promise<PolicyResolverOutput<T>> => ({ created: input.created, deleted: input.deleted, renamed: [] });
+
+const autoTablePolicyResolverNoRename = async <T extends { name: string }>(
+	input: TablePolicyResolverInput<T>,
+): Promise<TablePolicyResolverOutput<T>> => ({
+	tableName: input.tableName,
+	schema: input.schema,
+	created: input.created,
+	deleted: input.deleted,
+	renamed: [],
+});
+
+const autoRolesResolverNoRename = async <T extends { name: string }>(
+	input: RolesResolverInput<T>,
+): Promise<RolesResolverOutput<T>> => ({ created: input.created, deleted: input.deleted, renamed: [] });
+
 export const schemasResolver = async (
 	input: ResolverInput<Table>,
 ): Promise<ResolverOutput<Table>> => {
@@ -354,9 +396,26 @@ export const prepareAndMigratePg = async (config: GenerateConfig) => {
 			validatedCur,
 		);
 
+		const { sqlStatements: downSqlStatements } = await applyPgSnapshotsDiff(
+			squashedCur,
+			squashedPrev,
+			autoResolverNoRename,
+			autoResolverWithMovedNoRename,
+			autoResolverWithMovedNoRename,
+			autoTablePolicyResolverNoRename,
+			autoPolicyResolverNoRename,
+			autoRolesResolverNoRename,
+			autoResolverWithMovedNoRename,
+			autoColumnsResolverNoRename,
+			autoResolverWithMovedNoRename,
+			validatedCur,
+			validatedPrev,
+		);
+
 		writeResult({
 			cur,
 			sqlStatements,
+			downSqlStatements,
 			journal,
 			outFolder,
 			name: config.name,
@@ -570,9 +629,20 @@ export const prepareAndMigrateMysql = async (config: GenerateConfig) => {
 			validatedCur,
 		);
 
+		const { sqlStatements: downSqlStatements } = await applyMysqlSnapshotsDiff(
+			squashedCur,
+			squashedPrev,
+			autoResolverWithMovedNoRename,
+			autoColumnsResolverNoRename,
+			autoResolverWithMovedNoRename,
+			validatedCur,
+			validatedPrev,
+		);
+
 		writeResult({
 			cur,
 			sqlStatements,
+			downSqlStatements,
 			journal,
 			_meta,
 			outFolder,
@@ -720,9 +790,20 @@ export const prepareAndMigrateSingleStore = async (config: GenerateConfig) => {
 			validatedCur,
 		);
 
+		const { sqlStatements: downSqlStatements } = await applySingleStoreSnapshotsDiff(
+			squashedCur,
+			squashedPrev,
+			autoResolverWithMovedNoRename,
+			autoColumnsResolverNoRename,
+			/* singleStoreViewsResolver, */
+			validatedCur,
+			validatedPrev,
+		);
+
 		writeResult({
 			cur,
 			sqlStatements,
+			downSqlStatements,
 			journal,
 			_meta,
 			outFolder,
@@ -845,9 +926,20 @@ export const prepareAndMigrateSqlite = async (config: GenerateConfig) => {
 			validatedCur,
 		);
 
+		const { sqlStatements: downSqlStatements } = await applySqliteSnapshotsDiff(
+			squashedCur,
+			squashedPrev,
+			autoResolverWithMovedNoRename,
+			autoColumnsResolverNoRename,
+			autoResolverWithMovedNoRename,
+			validatedCur,
+			validatedPrev,
+		);
+
 		writeResult({
 			cur,
 			sqlStatements,
+			downSqlStatements,
 			journal,
 			_meta,
 			outFolder,
@@ -940,9 +1032,20 @@ export const prepareAndMigrateLibSQL = async (config: GenerateConfig) => {
 			validatedCur,
 		);
 
+		const { sqlStatements: downSqlStatements } = await applyLibSQLSnapshotsDiff(
+			squashedCur,
+			squashedPrev,
+			autoResolverWithMovedNoRename,
+			autoColumnsResolverNoRename,
+			autoResolverWithMovedNoRename,
+			validatedCur,
+			validatedPrev,
+		);
+
 		writeResult({
 			cur,
 			sqlStatements,
+			downSqlStatements,
 			journal,
 			_meta,
 			outFolder,
@@ -1356,6 +1459,7 @@ export const BREAKPOINT = '--> statement-breakpoint\n';
 export const writeResult = ({
 	cur,
 	sqlStatements,
+	downSqlStatements,
 	journal,
 	_meta = {
 		columns: {},
@@ -1372,6 +1476,7 @@ export const writeResult = ({
 }: {
 	cur: CommonSchema;
 	sqlStatements: string[];
+	downSqlStatements?: string[];
 	journal: Journal;
 	_meta?: any;
 	outFolder: string;
@@ -1426,17 +1531,26 @@ export const writeResult = ({
 		sql = '-- Custom SQL migration file, put your code below! --';
 	}
 
+	const hasDown = downSqlStatements !== undefined && downSqlStatements.length > 0;
+
 	journal.entries.push({
 		idx,
 		version: cur.version,
 		when: +new Date(),
 		tag,
 		breakpoints: breakpoints,
+		...(hasDown ? { hasDown: true } : {}),
 	});
 
 	fs.writeFileSync(metaJournal, JSON.stringify(journal, null, 2));
 
 	fs.writeFileSync(`${outFolder}/${tag}.sql`, sql);
+
+	if (downSqlStatements !== undefined) {
+		const downSqlDelimiter = breakpoints ? BREAKPOINT : '\n';
+		const downSql = downSqlStatements.join(downSqlDelimiter);
+		fs.writeFileSync(`${outFolder}/${tag}.down.sql`, downSql);
+	}
 
 	// js file with .sql imports for React Native / Expo and Durable Sqlite Objects
 	if (bundle) {
@@ -1467,6 +1581,24 @@ export const embeddedMigrations = (journal: Journal, driver?: Driver) => {
 		content += `import m${entry.idx.toString().padStart(4, '0')} from './${entry.tag}.sql';\n`;
 	});
 
+	const hasAnyDown = journal.entries.some((e) => e.hasDown);
+	if (hasAnyDown) {
+		journal.entries.forEach((entry) => {
+			if (entry.hasDown) {
+				content += `import d${entry.idx.toString().padStart(4, '0')} from './${entry.tag}.down.sql';\n`;
+			}
+		});
+	}
+
+	const downMigrationsBlock = hasAnyDown
+		? `,\n    downMigrations: {\n      ${
+			journal.entries
+				.filter((it) => it.hasDown)
+				.map((it) => `d${it.idx.toString().padStart(4, '0')}`)
+				.join(',\n      ')
+		}\n    }`
+		: '';
+
 	content += `
   export default {
     journal,
@@ -1476,7 +1608,7 @@ export const embeddedMigrations = (journal: Journal, driver?: Driver) => {
 			.map((it) => `m${it.idx.toString().padStart(4, '0')}`)
 			.join(',\n')
 	}
-    }
+    }${downMigrationsBlock}
   }
   `;
 	return content;

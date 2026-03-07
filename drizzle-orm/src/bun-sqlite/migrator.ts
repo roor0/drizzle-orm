@@ -9,3 +9,12 @@ export function migrate<TSchema extends Record<string, unknown>>(
 	const migrations = readMigrationFiles(config);
 	db.dialect.migrate(migrations, db.session, config);
 }
+
+export function rollback<TSchema extends Record<string, unknown>>(
+	db: BunSQLiteDatabase<TSchema>,
+	config: MigrationConfig,
+	steps?: number,
+) {
+	const migrations = readMigrationFiles(config);
+	db.dialect.rollback(migrations, db.session, config, steps);
+}
