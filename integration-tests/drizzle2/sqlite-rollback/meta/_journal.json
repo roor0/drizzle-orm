@@ -1,0 +1,22 @@
+{
+  "version": "5",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1700000000000,
+      "tag": "0000_create_rollback_users",
+      "breakpoints": true,
+      "hasDown": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1700000001000,
+      "tag": "0001_create_rollback_posts",
+      "breakpoints": true,
+      "hasDown": true
+    }
+  ]
+}
