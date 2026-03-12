@@ -126,11 +126,7 @@ describe('writeResult — down SQL file generation', () => {
 		expect(entry.hasDown).toBeUndefined();
 
 		const tag = entry.tag;
-		// Empty downSqlStatements: file is written (empty content is valid)
-		const downPath = path.join(tmpDir, `${tag}.down.sql`);
-		if (fs.existsSync(downPath)) {
-			expect(fs.readFileSync(downPath, 'utf8')).toBe('');
-		}
+		expect(fs.existsSync(path.join(tmpDir, `${tag}.down.sql`))).toBe(false);
 	});
 
 	test('respects breakpoints delimiter in .down.sql', () => {
@@ -166,7 +162,7 @@ describe('embeddedMigrations — down SQL bundling', () => {
 
 		expect(output).toContain("import d0000 from './0000_test.down.sql'");
 		expect(output).toContain('downMigrations');
-		expect(output).toContain('d0000');
+		expect(output).toContain('m0000: d0000');
 	});
 
 	test('omits downMigrations block when no entries have hasDown', () => {
@@ -199,7 +195,7 @@ describe('embeddedMigrations — down SQL bundling', () => {
 		expect(output).toContain("import d0001 from './0001_has_down.down.sql'");
 		expect(output).not.toContain("import d0000 from './0000_no_down.down.sql'");
 		expect(output).toContain('downMigrations');
-		expect(output).toContain('d0001');
+		expect(output).toContain('m0001: d0001');
 		expect(output).not.toContain('d0000');
 	});
 

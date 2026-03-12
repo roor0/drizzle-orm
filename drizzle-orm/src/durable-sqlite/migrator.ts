@@ -108,7 +108,7 @@ export async function rollback<
 			const migrationsTable = '__drizzle_migrations';
 
 			const dbMigrations = db.values<[number, string, string]>(
-				sql`SELECT id, hash, created_at FROM ${
+				sql`SELECT rowid, hash, created_at FROM ${
 					sql.identifier(migrationsTable)
 				} ORDER BY created_at DESC LIMIT ${sql.raw(String(steps))}`,
 			);
@@ -118,7 +118,9 @@ export async function rollback<
 			}
 
 			for (const dbMigration of dbMigrations) {
-				const meta = migrations.find((m) => m.hash === dbMigration[1]);
+				const meta = migrations.find((m) =>
+					m.hash ? m.hash === dbMigration[1] : m.folderMillis === Number(dbMigration[2])
+				);
 				if (!meta) {
 					throw new DrizzleError({
 						message: `Cannot rollback migration with hash ${dbMigration[1]}: migration file not found`,
@@ -133,7 +135,7 @@ export async function rollback<
 					db.run(sql.raw(stmt));
 				}
 				db.run(
-					sql`DELETE FROM ${sql.identifier(migrationsTable)} WHERE hash = ${dbMigration[1]}`,
+					sql`DELETE FROM ${sql.identifier(migrationsTable)} WHERE rowid = ${dbMigration[0]}`,
 				);
 			}
 		} catch (error: any) {

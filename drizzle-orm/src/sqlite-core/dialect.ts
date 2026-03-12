@@ -891,7 +891,7 @@ export class SQLiteSyncDialect extends SQLiteDialect {
 			: config.migrationsTable ?? '__drizzle_migrations';
 
 		const dbMigrations = session.values<[number, string, string]>(
-			sql`SELECT id, hash, created_at FROM ${
+			sql`SELECT rowid, hash, created_at FROM ${
 				sql.identifier(migrationsTable)
 			} ORDER BY created_at DESC LIMIT ${sql.raw(String(steps))}`,
 		);
@@ -903,7 +903,9 @@ export class SQLiteSyncDialect extends SQLiteDialect {
 		session.run(sql`BEGIN`);
 		try {
 			for (const dbMigration of dbMigrations) {
-				const meta = migrations.find((m) => m.hash === dbMigration[1]);
+				const meta = migrations.find((m) =>
+					m.hash ? m.hash === dbMigration[1] : m.folderMillis === Number(dbMigration[2])
+				);
 				if (!meta) {
 					throw new DrizzleError({
 						message: `Cannot rollback migration with hash ${dbMigration[1]}: migration file not found`,
@@ -918,7 +920,7 @@ export class SQLiteSyncDialect extends SQLiteDialect {
 					session.run(sql.raw(stmt));
 				}
 				session.run(
-					sql`DELETE FROM ${sql.identifier(migrationsTable)} WHERE hash = ${dbMigration[1]}`,
+					sql`DELETE FROM ${sql.identifier(migrationsTable)} WHERE rowid = ${dbMigration[0]}`,
 				);
 			}
 			session.run(sql`COMMIT`);
@@ -987,7 +989,7 @@ export class SQLiteAsyncDialect extends SQLiteDialect {
 			: config.migrationsTable ?? '__drizzle_migrations';
 
 		const dbMigrations = await session.values<[number, string, string]>(
-			sql`SELECT id, hash, created_at FROM ${
+			sql`SELECT rowid, hash, created_at FROM ${
 				sql.identifier(migrationsTable)
 			} ORDER BY created_at DESC LIMIT ${sql.raw(String(steps))}`,
 		);
@@ -998,7 +1000,9 @@ export class SQLiteAsyncDialect extends SQLiteDialect {
 
 		await session.transaction(async (tx) => {
 			for (const dbMigration of dbMigrations) {
-				const meta = migrations.find((m) => m.hash === dbMigration[1]);
+				const meta = migrations.find((m) =>
+					m.hash ? m.hash === dbMigration[1] : m.folderMillis === Number(dbMigration[2])
+				);
 				if (!meta) {
 					throw new DrizzleError({
 						message: `Cannot rollback migration with hash ${dbMigration[1]}: migration file not found`,
@@ -1013,7 +1017,7 @@ export class SQLiteAsyncDialect extends SQLiteDialect {
 					await tx.run(sql.raw(stmt));
 				}
 				await tx.run(
-					sql`DELETE FROM ${sql.identifier(migrationsTable)} WHERE hash = ${dbMigration[1]}`,
+					sql`DELETE FROM ${sql.identifier(migrationsTable)} WHERE rowid = ${dbMigration[0]}`,
 				);
 			}
 		});

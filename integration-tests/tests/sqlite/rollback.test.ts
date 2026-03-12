@@ -5,6 +5,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { migrate, rollback } from 'drizzle-orm/better-sqlite3/migrator';
+import type { MigrationMeta } from 'drizzle-orm/migrator';
 import { readMigrationFiles } from 'drizzle-orm/migrator';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 
@@ -171,6 +172,18 @@ describe('rollback — better-sqlite3', () => {
 		expect(appliedMigrations(client)).toHaveLength(1);
 	});
 
+	test('rollback with steps > applied migrations rolls back all applied migrations', () => {
+		migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+		expect(appliedMigrations(client)).toHaveLength(2);
+
+		// Request more rollbacks than applied migrations — should clamp silently
+		rollback(db, { migrationsFolder: MIGRATIONS_FOLDER }, 99);
+
+		expect(tableExists(client, 'rollback_users')).toBe(false);
+		expect(tableExists(client, 'rollback_posts')).toBe(false);
+		expect(appliedMigrations(client)).toHaveLength(0);
+	});
+
 	test('rollback when no migrations applied is a no-op', () => {
 		// create the tracking table but no migrations applied
 		client.exec(`CREATE TABLE __drizzle_migrations (id INTEGER PRIMARY KEY, hash TEXT, created_at NUMERIC)`);
@@ -228,5 +241,80 @@ describe('rollback — better-sqlite3', () => {
 		} finally {
 			fs.rmSync(tmpDir, { recursive: true, force: true });
 		}
+	});
+});
+
+// ─── rollback with bundled (empty hash) migrations ───────────────────────────
+
+describe('rollback — bundled migrations (hash: "")', () => {
+	// Simulates expo-sqlite / op-sqlite / durable-sqlite where readMigrationFiles
+	// sets hash: '' for every entry. Before the fix, find() always matched the
+	// first meta and DELETE WHERE hash='' removed all tracking rows at once.
+
+	const WHEN_USERS = 1700000000000;
+	const WHEN_POSTS = 1700000001000;
+
+	const bundledMetas: MigrationMeta[] = [
+		{
+			sql: ['CREATE TABLE bundled_users (id INTEGER PRIMARY KEY)'],
+			downSql: ['DROP TABLE bundled_users'],
+			bps: true,
+			folderMillis: WHEN_USERS,
+			hash: '',
+		},
+		{
+			sql: ['CREATE TABLE bundled_posts (id INTEGER PRIMARY KEY)'],
+			downSql: ['DROP TABLE bundled_posts'],
+			bps: true,
+			folderMillis: WHEN_POSTS,
+			hash: '',
+		},
+	];
+
+	let client: Database.Database;
+	let db: ReturnType<typeof drizzle>;
+
+	beforeEach(() => {
+		client = new Database(':memory:');
+		db = drizzle(client);
+		client.exec(
+			`CREATE TABLE __drizzle_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, hash TEXT, created_at NUMERIC)`,
+		);
+		// Simulate what bundled migrate() writes
+		client.exec(`INSERT INTO __drizzle_migrations (hash, created_at) VALUES ('', ${WHEN_USERS})`);
+		client.exec(`CREATE TABLE bundled_users (id INTEGER PRIMARY KEY)`);
+		client.exec(`INSERT INTO __drizzle_migrations (hash, created_at) VALUES ('', ${WHEN_POSTS})`);
+		client.exec(`CREATE TABLE bundled_posts (id INTEGER PRIMARY KEY)`);
+	});
+
+	afterEach(() => {
+		client.close();
+	});
+
+	test('rollback(1) targets the most recent bundled migration, not the first', () => {
+		db.dialect.rollback(bundledMetas, db.session, undefined, 1);
+
+		expect(tableExists(client, 'bundled_posts')).toBe(false);
+		expect(tableExists(client, 'bundled_users')).toBe(true);
+		expect(appliedMigrations(client)).toHaveLength(1);
+	});
+
+	test('DELETE by rowid removes only the targeted row', () => {
+		db.dialect.rollback(bundledMetas, db.session, undefined, 1);
+
+		// Exactly one tracking row must remain (the users migration)
+		const remaining = client
+			.prepare(`SELECT created_at FROM __drizzle_migrations`)
+			.all() as { created_at: number }[];
+		expect(remaining).toHaveLength(1);
+		expect(remaining[0]!.created_at).toBe(WHEN_USERS);
+	});
+
+	test('rollback(2) removes both bundled migration rows', () => {
+		db.dialect.rollback(bundledMetas, db.session, undefined, 2);
+
+		expect(tableExists(client, 'bundled_users')).toBe(false);
+		expect(tableExists(client, 'bundled_posts')).toBe(false);
+		expect(appliedMigrations(client)).toHaveLength(0);
 	});
 });
