@@ -1,4 +1,5 @@
 import { useEffect, useReducer } from 'react';
+import { DrizzleError } from '~/errors.ts';
 import type { MigrationMeta } from '~/migrator.ts';
 import type { ExpoSQLiteDatabase } from './driver.ts';
 
@@ -7,13 +8,15 @@ interface MigrationConfig {
 		entries: { idx: number; when: number; tag: string; breakpoints: boolean }[];
 	};
 	migrations: Record<string, string>;
+	downMigrations?: Record<string, string>;
 }
 
-async function readMigrationFiles({ journal, migrations }: MigrationConfig): Promise<MigrationMeta[]> {
+async function readMigrationFiles({ journal, migrations, downMigrations }: MigrationConfig): Promise<MigrationMeta[]> {
 	const migrationQueries: MigrationMeta[] = [];
 
 	for await (const journalEntry of journal.entries) {
-		const query = migrations[`m${journalEntry.idx.toString().padStart(4, '0')}`];
+		const key = `m${journalEntry.idx.toString().padStart(4, '0')}`;
+		const query = migrations[key];
 
 		if (!query) {
 			throw new Error(`Missing migration: ${journalEntry.tag}`);
@@ -24,8 +27,15 @@ async function readMigrationFiles({ journal, migrations }: MigrationConfig): Pro
 				return it;
 			});
 
+			let downSql: string[] | undefined;
+			const downQuery = downMigrations?.[key];
+			if (downQuery?.trim()) {
+				downSql = downQuery.trim().split('--> statement-breakpoint').map((it) => it);
+			}
+
 			migrationQueries.push({
 				sql: result,
+				downSql,
 				bps: journalEntry.breakpoints,
 				folderMillis: journalEntry.when,
 				hash: '',
@@ -44,6 +54,15 @@ export async function migrate<TSchema extends Record<string, unknown>>(
 ) {
 	const migrations = await readMigrationFiles(config);
 	return db.dialect.migrate(migrations, db.session);
+}
+
+export async function rollback<TSchema extends Record<string, unknown>>(
+	db: ExpoSQLiteDatabase<TSchema>,
+	config: MigrationConfig,
+	steps: number = 1,
+) {
+	const migrations = await readMigrationFiles(config);
+	await db.dialect.rollback(migrations, db.session, undefined, steps);
 }
 
 interface State {

@@ -65,6 +65,142 @@ export type NamedWithSchema = {
 	schema: string;
 };
 
+// ─── helpers for rename-aware down SQL generation ────────────────────────────
+
+function invertRenames<T extends { name: string }>(
+	forwardRenames: { from: T; to: T }[],
+	inputCreated: T[],
+	inputDeleted: T[],
+): { renamed: { from: T; to: T }[]; created: T[]; deleted: T[] } {
+	const created = [...inputCreated];
+	const deleted = [...inputDeleted];
+	const renamed: { from: T; to: T }[] = [];
+	for (const { from, to } of forwardRenames) {
+		// In the down diff, 'to' (new name) appears in deleted and 'from' (old name) in created.
+		const delIdx = deleted.findIndex((d) => d.name === to.name);
+		const creIdx = created.findIndex((c) => c.name === from.name);
+		if (delIdx !== -1 && creIdx !== -1) {
+			renamed.push({ from: deleted[delIdx]!, to: created[creIdx]! });
+			deleted.splice(delIdx, 1);
+			created.splice(creIdx, 1);
+		}
+	}
+	return { renamed, created, deleted };
+}
+
+function withCapture<
+	T extends { name: string },
+	TIn extends { created: T[]; deleted: T[] },
+	TOut extends { renamed: { from: T; to: T }[]; created: T[]; deleted: T[] },
+>(
+	resolver: (input: TIn) => Promise<TOut>,
+	store: { from: T; to: T }[],
+): (input: TIn) => Promise<TOut> {
+	return async (input) => {
+		const result = await resolver(input);
+		store.push(...result.renamed);
+		return result;
+	};
+}
+
+function withCaptureWithMoved<
+	T extends { name: string },
+	TIn extends { created: T[]; deleted: T[] },
+	TOut extends {
+		renamed: { from: T; to: T }[];
+		created: T[];
+		deleted: T[];
+		moved: { name: string; schemaFrom: string; schemaTo: string }[];
+	},
+>(
+	resolver: (input: TIn) => Promise<TOut>,
+	renames: { from: T; to: T }[],
+	moved: { name: string; schemaFrom: string; schemaTo: string }[],
+): (input: TIn) => Promise<TOut> {
+	return async (input) => {
+		const result = await resolver(input);
+		renames.push(...result.renamed);
+		moved.push(...result.moved);
+		return result;
+	};
+}
+
+function withCaptureColumns<T extends { name: string }>(
+	resolver: (input: ColumnsResolverInput<T>) => Promise<ColumnsResolverOutput<T>>,
+	store: Map<string, { from: T; to: T }[]>,
+): (input: ColumnsResolverInput<T>) => Promise<ColumnsResolverOutput<T>> {
+	return async (input) => {
+		const result = await resolver(input);
+		if (result.renamed.length > 0) {
+			store.set(input.tableName, [...(store.get(input.tableName) ?? []), ...result.renamed]);
+		}
+		return result;
+	};
+}
+
+function withCaptureTablePolicy<T extends { name: string }>(
+	resolver: (input: TablePolicyResolverInput<T>) => Promise<TablePolicyResolverOutput<T>>,
+	store: Map<string, { from: T; to: T }[]>,
+): (input: TablePolicyResolverInput<T>) => Promise<TablePolicyResolverOutput<T>> {
+	return async (input) => {
+		const result = await resolver(input);
+		if (result.renamed.length > 0) {
+			store.set(input.tableName, [...(store.get(input.tableName) ?? []), ...result.renamed]);
+		}
+		return result;
+	};
+}
+
+function makeInverseResolver<T extends { name: string }>(
+	renames: { from: T; to: T }[],
+): (input: ResolverInput<T>) => Promise<ResolverOutput<T>> {
+	return async (input) => {
+		const r = invertRenames(renames, input.created, input.deleted);
+		return { renamed: r.renamed, created: r.created, deleted: r.deleted };
+	};
+}
+
+function makeInverseResolverWithMoved<T extends { name: string }>(
+	renames: { from: T; to: T }[],
+	moved: { name: string; schemaFrom: string; schemaTo: string }[],
+): (input: ResolverInput<T>) => Promise<ResolverOutputWithMoved<T>> {
+	return async (input) => {
+		const r = invertRenames(renames, input.created, input.deleted);
+		const inverseMoved = moved
+			.filter((m) => input.deleted.some((d) => d.name === m.name))
+			.map((m) => ({ name: m.name, schemaFrom: m.schemaTo, schemaTo: m.schemaFrom }));
+		return { renamed: r.renamed, created: r.created, deleted: r.deleted, moved: inverseMoved };
+	};
+}
+
+function makeInverseColumnsResolver<T extends { name: string }>(
+	store: Map<string, { from: T; to: T }[]>,
+	tableRenames: { from: { name: string }; to: { name: string } }[],
+): (input: ColumnsResolverInput<T>) => Promise<ColumnsResolverOutput<T>> {
+	return async (input) => {
+		// The down diff calls columnsResolver with the new table name. The forward resolver
+		// may have stored column renames under either the old or the new table name.
+		const oldName =
+			tableRenames.find((r) => r.to.name === input.tableName)?.from.name ?? input.tableName;
+		const renames = store.get(input.tableName) ?? store.get(oldName) ?? [];
+		const r = invertRenames(renames, input.created, input.deleted);
+		return { tableName: input.tableName, schema: input.schema, renamed: r.renamed, created: r.created, deleted: r.deleted };
+	};
+}
+
+function makeInverseTablePolicyResolver<T extends { name: string }>(
+	store: Map<string, { from: T; to: T }[]>,
+	tableRenames: { from: { name: string }; to: { name: string } }[],
+): (input: TablePolicyResolverInput<T>) => Promise<TablePolicyResolverOutput<T>> {
+	return async (input) => {
+		const oldName =
+			tableRenames.find((r) => r.to.name === input.tableName)?.from.name ?? input.tableName;
+		const renames = store.get(input.tableName) ?? store.get(oldName) ?? [];
+		const r = invertRenames(renames, input.created, input.deleted);
+		return { tableName: input.tableName, schema: input.schema, renamed: r.renamed, created: r.created, deleted: r.deleted };
+	};
+}
+
 export const schemasResolver = async (
 	input: ResolverInput<Table>,
 ): Promise<ResolverOutput<Table>> => {
@@ -338,25 +474,56 @@ export const prepareAndMigratePg = async (config: GenerateConfig) => {
 		const squashedPrev = squashPgScheme(validatedPrev);
 		const squashedCur = squashPgScheme(validatedCur);
 
+		const pgSchemaRenames: { from: any; to: any }[] = [];
+		const pgEnumRenames: { from: any; to: any }[] = [];
+		const pgEnumMoved: { name: string; schemaFrom: string; schemaTo: string }[] = [];
+		const pgSeqRenames: { from: any; to: any }[] = [];
+		const pgSeqMoved: { name: string; schemaFrom: string; schemaTo: string }[] = [];
+		const pgTableRenames: { from: any; to: any }[] = [];
+		const pgTableMoved: { name: string; schemaFrom: string; schemaTo: string }[] = [];
+		const pgColRenames = new Map<string, { from: any; to: any }[]>();
+		const pgViewRenames: { from: any; to: any }[] = [];
+		const pgViewMoved: { name: string; schemaFrom: string; schemaTo: string }[] = [];
+		const pgRoleRenames: { from: any; to: any }[] = [];
+		const pgPolicyRenames: { from: any; to: any }[] = [];
+		const pgTblPolicyRenames = new Map<string, { from: any; to: any }[]>();
+
 		const { sqlStatements, _meta } = await applyPgSnapshotsDiff(
 			squashedPrev,
 			squashedCur,
-			schemasResolver,
-			enumsResolver,
-			sequencesResolver,
-			policyResolver,
-			indPolicyResolver,
-			roleResolver,
-			tablesResolver,
-			columnsResolver,
-			viewsResolver,
+			withCapture(schemasResolver, pgSchemaRenames),
+			withCaptureWithMoved(enumsResolver, pgEnumRenames, pgEnumMoved),
+			withCaptureWithMoved(sequencesResolver, pgSeqRenames, pgSeqMoved),
+			withCaptureTablePolicy(policyResolver, pgTblPolicyRenames),
+			withCapture(indPolicyResolver, pgPolicyRenames),
+			withCapture(roleResolver, pgRoleRenames),
+			withCaptureWithMoved(tablesResolver, pgTableRenames, pgTableMoved),
+			withCaptureColumns(columnsResolver, pgColRenames),
+			withCaptureWithMoved(viewsResolver, pgViewRenames, pgViewMoved),
 			validatedPrev,
 			validatedCur,
+		);
+
+		const { sqlStatements: downSqlStatements } = await applyPgSnapshotsDiff(
+			squashedCur,
+			squashedPrev,
+			makeInverseResolver(pgSchemaRenames),
+			makeInverseResolverWithMoved(pgEnumRenames, pgEnumMoved),
+			makeInverseResolverWithMoved(pgSeqRenames, pgSeqMoved),
+			makeInverseTablePolicyResolver(pgTblPolicyRenames, pgTableRenames),
+			makeInverseResolver(pgPolicyRenames),
+			makeInverseResolver(pgRoleRenames),
+			makeInverseResolverWithMoved(pgTableRenames, pgTableMoved),
+			makeInverseColumnsResolver(pgColRenames, pgTableRenames),
+			makeInverseResolverWithMoved(pgViewRenames, pgViewMoved),
+			validatedCur,
+			validatedPrev,
 		);
 
 		writeResult({
 			cur,
 			sqlStatements,
+			downSqlStatements,
 			journal,
 			outFolder,
 			name: config.name,
@@ -560,19 +727,36 @@ export const prepareAndMigrateMysql = async (config: GenerateConfig) => {
 		const squashedPrev = squashMysqlScheme(validatedPrev);
 		const squashedCur = squashMysqlScheme(validatedCur);
 
+		const mysqlTableRenames: { from: any; to: any }[] = [];
+		const mysqlTableMoved: { name: string; schemaFrom: string; schemaTo: string }[] = [];
+		const mysqlColRenames = new Map<string, { from: any; to: any }[]>();
+		const mysqlViewRenames: { from: any; to: any }[] = [];
+		const mysqlViewMoved: { name: string; schemaFrom: string; schemaTo: string }[] = [];
+
 		const { sqlStatements, statements, _meta } = await applyMysqlSnapshotsDiff(
 			squashedPrev,
 			squashedCur,
-			tablesResolver,
-			columnsResolver,
-			mySqlViewsResolver,
+			withCaptureWithMoved(tablesResolver, mysqlTableRenames, mysqlTableMoved),
+			withCaptureColumns(columnsResolver, mysqlColRenames),
+			withCaptureWithMoved(mySqlViewsResolver, mysqlViewRenames, mysqlViewMoved),
 			validatedPrev,
 			validatedCur,
+		);
+
+		const { sqlStatements: downSqlStatements } = await applyMysqlSnapshotsDiff(
+			squashedCur,
+			squashedPrev,
+			makeInverseResolverWithMoved(mysqlTableRenames, mysqlTableMoved),
+			makeInverseColumnsResolver(mysqlColRenames, mysqlTableRenames),
+			makeInverseResolverWithMoved(mysqlViewRenames, mysqlViewMoved),
+			validatedCur,
+			validatedPrev,
 		);
 
 		writeResult({
 			cur,
 			sqlStatements,
+			downSqlStatements,
 			journal,
 			_meta,
 			outFolder,
@@ -710,19 +894,34 @@ export const prepareAndMigrateSingleStore = async (config: GenerateConfig) => {
 		const squashedPrev = squashSingleStoreScheme(validatedPrev);
 		const squashedCur = squashSingleStoreScheme(validatedCur);
 
+		const ssTableRenames: { from: any; to: any }[] = [];
+		const ssTableMoved: { name: string; schemaFrom: string; schemaTo: string }[] = [];
+		const ssColRenames = new Map<string, { from: any; to: any }[]>();
+
 		const { sqlStatements, _meta } = await applySingleStoreSnapshotsDiff(
 			squashedPrev,
 			squashedCur,
-			tablesResolver,
-			columnsResolver,
+			withCaptureWithMoved(tablesResolver, ssTableRenames, ssTableMoved),
+			withCaptureColumns(columnsResolver, ssColRenames),
 			/* singleStoreViewsResolver, */
 			validatedPrev,
 			validatedCur,
 		);
 
+		const { sqlStatements: downSqlStatements } = await applySingleStoreSnapshotsDiff(
+			squashedCur,
+			squashedPrev,
+			makeInverseResolverWithMoved(ssTableRenames, ssTableMoved),
+			makeInverseColumnsResolver(ssColRenames, ssTableRenames),
+			/* singleStoreViewsResolver, */
+			validatedCur,
+			validatedPrev,
+		);
+
 		writeResult({
 			cur,
 			sqlStatements,
+			downSqlStatements,
 			journal,
 			_meta,
 			outFolder,
@@ -835,19 +1034,36 @@ export const prepareAndMigrateSqlite = async (config: GenerateConfig) => {
 		const squashedPrev = squashSqliteScheme(validatedPrev);
 		const squashedCur = squashSqliteScheme(validatedCur);
 
+		const sqliteTableRenames: { from: any; to: any }[] = [];
+		const sqliteTableMoved: { name: string; schemaFrom: string; schemaTo: string }[] = [];
+		const sqliteColRenames = new Map<string, { from: any; to: any }[]>();
+		const sqliteViewRenames: { from: any; to: any }[] = [];
+		const sqliteViewMoved: { name: string; schemaFrom: string; schemaTo: string }[] = [];
+
 		const { sqlStatements, _meta } = await applySqliteSnapshotsDiff(
 			squashedPrev,
 			squashedCur,
-			tablesResolver,
-			columnsResolver,
-			sqliteViewsResolver,
+			withCaptureWithMoved(tablesResolver, sqliteTableRenames, sqliteTableMoved),
+			withCaptureColumns(columnsResolver, sqliteColRenames),
+			withCaptureWithMoved(sqliteViewsResolver, sqliteViewRenames, sqliteViewMoved),
 			validatedPrev,
 			validatedCur,
+		);
+
+		const { sqlStatements: downSqlStatements } = await applySqliteSnapshotsDiff(
+			squashedCur,
+			squashedPrev,
+			makeInverseResolverWithMoved(sqliteTableRenames, sqliteTableMoved),
+			makeInverseColumnsResolver(sqliteColRenames, sqliteTableRenames),
+			makeInverseResolverWithMoved(sqliteViewRenames, sqliteViewMoved),
+			validatedCur,
+			validatedPrev,
 		);
 
 		writeResult({
 			cur,
 			sqlStatements,
+			downSqlStatements,
 			journal,
 			_meta,
 			outFolder,
@@ -930,19 +1146,36 @@ export const prepareAndMigrateLibSQL = async (config: GenerateConfig) => {
 		const squashedPrev = squashSqliteScheme(validatedPrev);
 		const squashedCur = squashSqliteScheme(validatedCur);
 
+		const libsqlTableRenames: { from: any; to: any }[] = [];
+		const libsqlTableMoved: { name: string; schemaFrom: string; schemaTo: string }[] = [];
+		const libsqlColRenames = new Map<string, { from: any; to: any }[]>();
+		const libsqlViewRenames: { from: any; to: any }[] = [];
+		const libsqlViewMoved: { name: string; schemaFrom: string; schemaTo: string }[] = [];
+
 		const { sqlStatements, _meta } = await applyLibSQLSnapshotsDiff(
 			squashedPrev,
 			squashedCur,
-			tablesResolver,
-			columnsResolver,
-			sqliteViewsResolver,
+			withCaptureWithMoved(tablesResolver, libsqlTableRenames, libsqlTableMoved),
+			withCaptureColumns(columnsResolver, libsqlColRenames),
+			withCaptureWithMoved(sqliteViewsResolver, libsqlViewRenames, libsqlViewMoved),
 			validatedPrev,
 			validatedCur,
+		);
+
+		const { sqlStatements: downSqlStatements } = await applyLibSQLSnapshotsDiff(
+			squashedCur,
+			squashedPrev,
+			makeInverseResolverWithMoved(libsqlTableRenames, libsqlTableMoved),
+			makeInverseColumnsResolver(libsqlColRenames, libsqlTableRenames),
+			makeInverseResolverWithMoved(libsqlViewRenames, libsqlViewMoved),
+			validatedCur,
+			validatedPrev,
 		);
 
 		writeResult({
 			cur,
 			sqlStatements,
+			downSqlStatements,
 			journal,
 			_meta,
 			outFolder,
@@ -1356,6 +1589,7 @@ export const BREAKPOINT = '--> statement-breakpoint\n';
 export const writeResult = ({
 	cur,
 	sqlStatements,
+	downSqlStatements,
 	journal,
 	_meta = {
 		columns: {},
@@ -1372,6 +1606,7 @@ export const writeResult = ({
 }: {
 	cur: CommonSchema;
 	sqlStatements: string[];
+	downSqlStatements?: string[];
 	journal: Journal;
 	_meta?: any;
 	outFolder: string;
@@ -1426,17 +1661,26 @@ export const writeResult = ({
 		sql = '-- Custom SQL migration file, put your code below! --';
 	}
 
+	const hasDown = downSqlStatements !== undefined && downSqlStatements.length > 0;
+
 	journal.entries.push({
 		idx,
 		version: cur.version,
 		when: +new Date(),
 		tag,
 		breakpoints: breakpoints,
+		...(hasDown ? { hasDown: true } : {}),
 	});
 
 	fs.writeFileSync(metaJournal, JSON.stringify(journal, null, 2));
 
 	fs.writeFileSync(`${outFolder}/${tag}.sql`, sql);
+
+	if (downSqlStatements !== undefined && downSqlStatements.length > 0) {
+		const downSqlDelimiter = breakpoints ? BREAKPOINT : '\n';
+		const downSql = downSqlStatements.join(downSqlDelimiter);
+		fs.writeFileSync(`${outFolder}/${tag}.down.sql`, downSql);
+	}
 
 	// js file with .sql imports for React Native / Expo and Durable Sqlite Objects
 	if (bundle) {
@@ -1467,6 +1711,28 @@ export const embeddedMigrations = (journal: Journal, driver?: Driver) => {
 		content += `import m${entry.idx.toString().padStart(4, '0')} from './${entry.tag}.sql';\n`;
 	});
 
+	const hasAnyDown = journal.entries.some((e) => e.hasDown);
+	if (hasAnyDown) {
+		journal.entries.forEach((entry) => {
+			if (entry.hasDown) {
+				content += `import d${entry.idx.toString().padStart(4, '0')} from './${entry.tag}.down.sql';\n`;
+			}
+		});
+	}
+
+	const downMigrationsBlock = hasAnyDown
+		? `,\n    downMigrations: {\n      ${
+			journal.entries
+				.filter((it) => it.hasDown)
+				.map((it) => {
+					const key = `m${it.idx.toString().padStart(4, '0')}`;
+					const val = `d${it.idx.toString().padStart(4, '0')}`;
+					return `${key}: ${val}`;
+				})
+				.join(',\n      ')
+		}\n    }`
+		: '';
+
 	content += `
   export default {
     journal,
@@ -1476,7 +1742,7 @@ export const embeddedMigrations = (journal: Journal, driver?: Driver) => {
 			.map((it) => `m${it.idx.toString().padStart(4, '0')}`)
 			.join(',\n')
 	}
-    }
+    }${downMigrationsBlock}
   }
   `;
 	return content;

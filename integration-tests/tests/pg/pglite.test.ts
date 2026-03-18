@@ -1,7 +1,7 @@
 import { PGlite } from '@electric-sql/pglite';
 import { Name, sql } from 'drizzle-orm';
 import { drizzle, type PgliteDatabase } from 'drizzle-orm/pglite';
-import { migrate } from 'drizzle-orm/pglite/migrator';
+import { migrate, rollback } from 'drizzle-orm/pglite/migrator';
 import { afterAll, beforeAll, beforeEach, expect, test } from 'vitest';
 import { skipTests } from '~/common';
 import { tests, usersMigratorTable, usersTable } from './pg-common';
@@ -58,6 +58,83 @@ test('migrator : default migration strategy', async () => {
 
 	await db.execute(sql`drop table all_columns`);
 	await db.execute(sql`drop table users12`);
+	await db.execute(sql`drop table "drizzle"."__drizzle_migrations"`);
+});
+
+test('migrator : rollback(1) removes last migration', async () => {
+	await db.execute(sql`drop table if exists "rollback_users"`);
+	await db.execute(sql`drop table if exists "rollback_posts"`);
+	await db.execute(sql`drop table if exists "drizzle"."__drizzle_migrations"`);
+
+	await migrate(db, { migrationsFolder: './drizzle2/pg-rollback' });
+
+	const afterMigrate = await db.execute(sql`
+		select table_name from information_schema.tables
+		where table_schema = 'public' and table_name in ('rollback_users', 'rollback_posts')
+		order by table_name
+	`);
+	expect(afterMigrate.rows).toHaveLength(2);
+
+	await rollback(db, { migrationsFolder: './drizzle2/pg-rollback' }, 1);
+
+	const afterRollback = await db.execute(sql`
+		select table_name from information_schema.tables
+		where table_schema = 'public' and table_name in ('rollback_users', 'rollback_posts')
+		order by table_name
+	`);
+	expect(afterRollback.rows.map((r: any) => r.table_name)).toEqual(['rollback_users']);
+
+	const applied = await db.execute(sql`select hash from "drizzle"."__drizzle_migrations" order by created_at`);
+	expect(applied.rows).toHaveLength(1);
+
+	await db.execute(sql`drop table if exists "rollback_users"`);
+	await db.execute(sql`drop table "drizzle"."__drizzle_migrations"`);
+});
+
+test('migrator : rollback(2) undoes all migrations', async () => {
+	await db.execute(sql`drop table if exists "rollback_users"`);
+	await db.execute(sql`drop table if exists "rollback_posts"`);
+	await db.execute(sql`drop table if exists "drizzle"."__drizzle_migrations"`);
+
+	await migrate(db, { migrationsFolder: './drizzle2/pg-rollback' });
+	await rollback(db, { migrationsFolder: './drizzle2/pg-rollback' }, 2);
+
+	const tables = await db.execute(sql`
+		select table_name from information_schema.tables
+		where table_schema = 'public' and table_name in ('rollback_users', 'rollback_posts')
+	`);
+	expect(tables.rows).toHaveLength(0);
+
+	const applied = await db.execute(sql`select hash from "drizzle"."__drizzle_migrations" order by created_at`);
+	expect(applied.rows).toHaveLength(0);
+
+	await db.execute(sql`drop table "drizzle"."__drizzle_migrations"`);
+});
+
+test('migrator : rollback then migrate re-applies', async () => {
+	await db.execute(sql`drop table if exists "rollback_users"`);
+	await db.execute(sql`drop table if exists "rollback_posts"`);
+	await db.execute(sql`drop table if exists "drizzle"."__drizzle_migrations"`);
+
+	await migrate(db, { migrationsFolder: './drizzle2/pg-rollback' });
+	await rollback(db, { migrationsFolder: './drizzle2/pg-rollback' }, 1);
+
+	const afterRollback = await db.execute(sql`
+		select table_name from information_schema.tables
+		where table_schema = 'public' and table_name = 'rollback_posts'
+	`);
+	expect(afterRollback.rows).toHaveLength(0);
+
+	await migrate(db, { migrationsFolder: './drizzle2/pg-rollback' });
+
+	const afterReapply = await db.execute(sql`
+		select table_name from information_schema.tables
+		where table_schema = 'public' and table_name = 'rollback_posts'
+	`);
+	expect(afterReapply.rows).toHaveLength(1);
+
+	await db.execute(sql`drop table "rollback_users"`);
+	await db.execute(sql`drop table "rollback_posts"`);
 	await db.execute(sql`drop table "drizzle"."__drizzle_migrations"`);
 });
 
